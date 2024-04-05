@@ -5,14 +5,18 @@ import pandas as pd
 import logging
 import threading
 import multiprocessing
+import glob
+import warnings
 from retry_requests import retry
 
-HOTSPOT_CSV_FILENAME = "hotspot_data.csv"
-HOTSPOT_INFO_CSV_FILENAME = "hotspot_info_data.csv"
-ORG_OUI_CSV_FILENAME = "org_oui_data.csv"
+HOTSPOT_CSV_FILENAME = os.path.join("csv", "hotspot_data.csv")
+TEMP_HOTSPOT_INFO_CSV_FILENAME = os.path.join("csv", "hotspot_info_data_{}.csv")
+HOTSPOT_INFO_CSV_FILENAME = os.path.join("csv", "hotspot_info_data.csv")
+ORG_OUI_CSV_FILENAME = os.path.join("csv", "org_oui_data.csv")
 CACHE_SIZE = 100
 WORKER_THREAD_COUNT = multiprocessing.cpu_count()
-
+processed_records_counter = 0
+csv_records_counter = 0
 
 def call_api(url, session, log=False):
     try:
@@ -32,9 +36,11 @@ def call_api(url, session, log=False):
         return 'API call failed'
 
 
-def write_to_csv(data, file_name):
+def write_to_csv(data, file_name, log=False):
 
-    logging.info("Writing {} items in CSV file :{}".format(len(data), file_name))
+    if log:
+        logging.info("Writing {} items in CSV file :{}".format(len(data), file_name))
+
     df = pd.DataFrame()
     if type(data) is list:
         df = pd.concat(data)
@@ -49,7 +55,8 @@ def write_to_csv(data, file_name):
               quoting=csv.QUOTE_ALL,
               header=not os.path.exists(file_name))
 
-    logging.info("Written {} items in CSV file :{}".format(len(data), file_name))
+    if log:
+        logging.info("Written {} items in CSV file :{}".format(len(data), file_name))
 
 
 def process_org_oui_data():
@@ -60,7 +67,7 @@ def process_org_oui_data():
         response = call_api(url, req_session, True)
         if response != 'API call failed':
             json = response.json()
-            write_to_csv(pd.json_normalize(json['orgs']), ORG_OUI_CSV_FILENAME)
+            write_to_csv(pd.json_normalize(json['orgs']), ORG_OUI_CSV_FILENAME, True)
 
         logging.info("Processing for Org oui data completed")
 
@@ -76,7 +83,7 @@ def process_hotspots_data():
             logging.info("Processing for hotspots subnetwork {} data started".format(sub_network))
             url = start_url.format(sub_network)
             json = call_api(url, req_session, True).json()
-            write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME)
+            write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME, True)
             start_url_with_cursor = url + "&cursor={}"
             cursor = json['cursor']
             while cursor:
@@ -84,7 +91,7 @@ def process_hotspots_data():
                 response = call_api(url, req_session, True)
                 json = response.json()
                 cursor = json['cursor']
-                write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME)
+                write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME, True)
 
             logging.info("Processing for hotspots subnetwork {} data ended".format(sub_network))
 
@@ -92,30 +99,31 @@ def process_hotspots_data():
 def process_hotspot_info_records(records):
     cache = []
 
-    processed_records_csv = 0
-    fetch_records = 0
+    global processed_records_counter
+    global csv_records_counter
+    warnings.simplefilter(action='ignore', category=FutureWarning)
     base_url = "https://entities.nft.helium.io/v2/hotspot/{}"
     logging.info("Starting processing of {} records".format(len(records)))
     with retry() as session:
         for key in records:
             url = base_url.format(key)
             response = call_api(url, session)
-            fetch_records += 1
-            if fetch_records % 10 == 0:
-                logging.info("{} items fetched".format(fetch_records))
+            processed_records_counter += 1
+            if processed_records_counter % 100 == 0:
+                logging.info("{} items fetched".format(processed_records_counter))
 
             if response != 'API call failed':
                 cache.append(pd.json_normalize(response.json()))
 
             if len(cache) == CACHE_SIZE:
-                write_to_csv(cache, HOTSPOT_INFO_CSV_FILENAME)
-                processed_records_csv += CACHE_SIZE
-                logging.info("{} items added in CSV".format(fetch_records))
+                write_to_csv(cache, TEMP_HOTSPOT_INFO_CSV_FILENAME.format(threading.current_thread().name))
+                csv_records_counter += CACHE_SIZE
+                logging.info("{} items added in CSV".format(csv_records_counter))
                 cache = []
 
     # Write remaining items in cache to CSV
     if cache:
-        write_to_csv(cache, HOTSPOT_INFO_CSV_FILENAME)
+        write_to_csv(cache, TEMP_HOTSPOT_INFO_CSV_FILENAME.format(threading.current_thread().name))
         logging.info("Finished processing of {} records".format(len(records)))
 
 
@@ -135,7 +143,19 @@ def process_hotspot_info_data():
     with concurrent.futures.ThreadPoolExecutor(max_workers=WORKER_THREAD_COUNT) as executor:
         executor.map(process_hotspot_info_records, record_chunks)
 
-    logging.info("Processing for hotspot info ended  with thread count {}".format(WORKER_THREAD_COUNT))
+    logging.info("Processing for hotspot info ended")
+
+
+def merge_csvs():
+
+    joined_files = os.path.join("csv", "hotspot_info_data_ThreadPoolExecutor-*.csv")
+    joined_list = glob.glob(joined_files)
+    logging.info("Merging files: " + joined_files)
+    df_list = [pd.read_csv(x, dtype=str) for x in joined_list]
+    df = pd.concat(df_list, ignore_index=True)
+    write_to_csv(df, HOTSPOT_INFO_CSV_FILENAME)
+    for file in joined_list:
+        os.remove(file)
 
 
 def delete_old_csv_files():
@@ -148,6 +168,12 @@ def delete_old_csv_files():
     if os.path.exists(ORG_OUI_CSV_FILENAME):
         os.remove(ORG_OUI_CSV_FILENAME)
 
+    joined_files = os.path.join("csv", "hotspot_info_data_ThreadPoolExecutor-*.csv")
+    joined_list = glob.glob(joined_files)
+
+    for file in joined_list:
+        os.remove(file)
+
 
 def process_helium_data():
     process_hotspots_data()
@@ -157,6 +183,8 @@ def process_helium_data():
 
 def init():
     logging.basicConfig(format='%(asctime)s %(levelname)s %(thread)d [%(threadName)s] %(message)s', level=logging.INFO)
+    if not os.path.exists("csv"):
+        os.mkdir("csv")
 
 
 if __name__ == '__main__':
@@ -165,4 +193,5 @@ if __name__ == '__main__':
     logging.info("Helium Hotspot data extraction started")
     delete_old_csv_files()
     process_helium_data()
+    merge_csvs()
     logging.info("Helium Hotspot data extraction started")
