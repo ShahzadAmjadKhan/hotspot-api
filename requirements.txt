@@ -1,2 +1,2 @@
 pandas==2.2.1
-Requests==2.31.0
+retry_requests==2.0.0
