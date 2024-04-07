@@ -17,7 +17,16 @@ CACHE_SIZE = 100
 WORKER_THREAD_COUNT = multiprocessing.cpu_count()
 processed_records_counter = 0
 csv_records_counter = 0
-
+HOTSPOT_INFO_COLUMNS = ['name','description','image','asset_id','key_to_asset_key','entity_key_b64','key_serialization',
+                                 'entity_key_str','attributes','hotspot_infos.iot.location', 'hotspot_infos.iot.address',
+                                 'hotspot_infos.iot.street','hotspot_infos.iot.city','hotspot_infos.iot.state','hotspot_infos.iot.country',
+                                 'hotspot_infos.iot.is_active','hotspot_infos.iot.dc_onboarding_fee_paid','hotspot_infos.iot.elevation',
+                                 'hotspot_infos.iot.gain','hotspot_infos.iot.created_at','hotspot_infos.iot.asset','hotspot_infos.iot.lat',
+                                 'hotspot_infos.iot.long','hotspot_infos.mobile.address','hotspot_infos.mobile.asset',
+                                 'hotspot_infos.mobile.street','hotspot_infos.mobile.city','hotspot_infos.mobile.state',
+                                 'hotspot_infos.mobile.country','hotspot_infos.mobile.is_active','hotspot_infos.mobile.device_type',
+                                 'hotspot_infos.mobile.location','hotspot_infos.mobile.dc_onboarding_fee_paid','hotspot_infos.mobile.created_at',
+                                 'hotspot_infos.mobile.lat','hotspot_infos.mobile.long']
 def call_api(url, session, log=False):
     try:
         if log:
@@ -36,24 +45,35 @@ def call_api(url, session, log=False):
         return 'API call failed'
 
 
-def write_to_csv(data, file_name, log=False):
+def write_to_csv(data, file_name,columns=[], log=False):
 
     if log:
         logging.info("Writing {} items in CSV file :{}".format(len(data), file_name))
 
     df = pd.DataFrame()
     if type(data) is list:
-        df = pd.concat(data)
+        df = pd.concat(data, )
     else:
         df = data
 
-    df.to_csv(file_name,
-              mode='a',
-              encoding='utf-8',
-              index=False,
-              quotechar='"',
-              quoting=csv.QUOTE_ALL,
-              header=not os.path.exists(file_name))
+    if len(columns) == 0:
+        df.to_csv(file_name,
+                  mode='a',
+                  encoding='utf-8',
+                  index=False,
+                  quotechar='"',
+                  quoting=csv.QUOTE_ALL,
+                  header=not os.path.exists(file_name))
+    else:
+        df.reindex(columns=columns)
+        df.to_csv(file_name,
+                  mode='a',
+                  encoding='utf-8',
+                  index=False,
+                  quotechar='"',
+                  quoting=csv.QUOTE_ALL,
+                  columns=columns,
+                  header=not os.path.exists(file_name))
 
     if log:
         logging.info("Written {} items in CSV file :{}".format(len(data), file_name))
@@ -67,7 +87,7 @@ def process_org_oui_data():
         response = call_api(url, req_session, True)
         if response != 'API call failed':
             json = response.json()
-            write_to_csv(pd.json_normalize(json['orgs']), ORG_OUI_CSV_FILENAME, True)
+            write_to_csv(pd.json_normalize(json['orgs']), ORG_OUI_CSV_FILENAME,[], True)
 
         logging.info("Processing for Org oui data completed")
 
@@ -83,7 +103,7 @@ def process_hotspots_data():
             logging.info("Processing for hotspots subnetwork {} data started".format(sub_network))
             url = start_url.format(sub_network)
             json = call_api(url, req_session, True).json()
-            write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME, True)
+            write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME,[], True)
             start_url_with_cursor = url + "&cursor={}"
             cursor = json['cursor']
             while cursor:
@@ -91,7 +111,7 @@ def process_hotspots_data():
                 response = call_api(url, req_session, True)
                 json = response.json()
                 cursor = json['cursor']
-                write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME, True)
+                write_to_csv(pd.json_normalize(json['items']), HOTSPOT_CSV_FILENAME,[], True)
 
             logging.info("Processing for hotspots subnetwork {} data ended".format(sub_network))
 
@@ -104,6 +124,7 @@ def process_hotspot_info_records(records):
     warnings.simplefilter(action='ignore', category=FutureWarning)
     base_url = "https://entities.nft.helium.io/v2/hotspot/{}"
     logging.info("Starting processing of {} records".format(len(records)))
+
     with retry() as session:
         for key in records:
             url = base_url.format(key)
@@ -116,14 +137,15 @@ def process_hotspot_info_records(records):
                 cache.append(pd.json_normalize(response.json()))
 
             if len(cache) == CACHE_SIZE:
-                write_to_csv(cache, TEMP_HOTSPOT_INFO_CSV_FILENAME.format(threading.current_thread().name))
+                write_to_csv(cache, TEMP_HOTSPOT_INFO_CSV_FILENAME.format(threading.current_thread().name),
+                             HOTSPOT_INFO_COLUMNS)
                 csv_records_counter += CACHE_SIZE
                 logging.info("{} items added in CSV".format(csv_records_counter))
                 cache = []
 
     # Write remaining items in cache to CSV
     if cache:
-        write_to_csv(cache, TEMP_HOTSPOT_INFO_CSV_FILENAME.format(threading.current_thread().name))
+        write_to_csv(cache, TEMP_HOTSPOT_INFO_CSV_FILENAME.format(threading.current_thread().name), HOTSPOT_INFO_COLUMNS)
         logging.info("Finished processing of {} records".format(len(records)))
 
 
@@ -146,14 +168,14 @@ def process_hotspot_info_data():
     logging.info("Processing for hotspot info ended")
 
 
-def merge_csvs():
+def merge_hotspot_info_csvs():
 
     joined_files = os.path.join("csv", "hotspot_info_data_ThreadPoolExecutor-*.csv")
     joined_list = glob.glob(joined_files)
     logging.info("Merging files: " + joined_files)
     df_list = [pd.read_csv(x, dtype=str) for x in joined_list]
     df = pd.concat(df_list, ignore_index=True)
-    write_to_csv(df, HOTSPOT_INFO_CSV_FILENAME)
+    write_to_csv(df, HOTSPOT_INFO_CSV_FILENAME, HOTSPOT_INFO_COLUMNS)
     for file in joined_list:
         os.remove(file)
 
@@ -193,5 +215,5 @@ if __name__ == '__main__':
     logging.info("Helium Hotspot data extraction started")
     delete_old_csv_files()
     process_helium_data()
-    merge_csvs()
+    merge_hotspot_info_csvs()
     logging.info("Helium Hotspot data extraction started")
