@@ -1,0 +1,18 @@
+
+
+- Please ensure you have Python 3.6+ installed 
+- Download the zip file helium_data_extractor.zip 
+- Extract zip file content in a folder
+- Open command prompt and go to folder where zip file was extracted
+- Run below commands 
+	> pip install -r requirements.txt
+	> python helium_data_extractor.py
+	
+
+Notes:
+- Console logs will let you know the actions being performed in script
+- Script first call step1 API to fetch data and write CSV. This is repeated for each page and CSV is updated. 
+- Once step1 is completed, it fetch step3 API data and create CSV. 
+- Step 1 returns more than 1 Million records. This means step 2 will take time to complete. 
+- In order to improve performance of step2, multithreading is used. It will start threads based on number of logical processors of PC
+- Each thread of step2 will create its separate CSV file which will be merged once all data is fetched.  
